@@ -247,16 +247,18 @@ do_snmpify(Tab, Us, Storage) ->
 
 %% Start the recieiver
 init_receiver(Node, Tab, Storage, Cs, Reas={dumper,{add_table_copy, Tid}}) ->
+    Queue = queue:new(),
     rpc:call(Node, mnesia_lib, set, [{?MODULE, active_trans}, Tid]),
     case start_remote_sender(Node, Tab, Storage) of
 	{SenderPid, TabSize, DetsData} ->
-	    start_receiver(Tab,Storage,Cs,SenderPid,TabSize,DetsData,Reas);
+	    start_receiver(Tab,Storage,Cs,SenderPid,TabSize,DetsData,Reas, Queue);
 	Else ->
 	    Else
     end;
 init_receiver(Node, Tab,Storage,Cs,Reason) ->
     %% Grab a schema lock to avoid deadlock between table_loader and schema_commit dumping.
     %% Both may grab tables-locks in different order.
+	Queue = queue:new(),
     Load =
 	fun() ->
 		{_,Tid,Ts} = get(mnesia_activity_state),
@@ -273,7 +275,7 @@ init_receiver(Node, Tab,Storage,Cs,Reason) ->
 			true = lists:member(Node, Active),
 			{SenderPid, TabSize, DetsData} =
 			    start_remote_sender(Node,Tab,Storage),
-			Init = table_init_fun(SenderPid, Storage),
+			Init = table_init_fun(SenderPid, Storage, Queue),
 			Args = [self(),Tab,Storage,Cs,SenderPid,
 				TabSize,DetsData,Init],
 			Pid = spawn_link(?MODULE, spawned_receiver, Args),
@@ -318,18 +320,18 @@ start_remote_sender(Node,Tab,Storage) ->
 	    down(Tab, Storage)
     end.
 
-table_init_fun(SenderPid, Storage) ->
+table_init_fun(SenderPid, Storage, Queue) ->
     fun(read) ->
 	    Receiver = self(),
 	    SenderPid ! {Receiver, more},
-	    get_data(SenderPid, Receiver, Storage);
+	    get_data(SenderPid, Receiver, Storage, Queue);
        (close) ->
 	    ok
     end.
 
 %% Add_table_copy get's it's own locks.
-start_receiver(Tab,Storage,Cs,SenderPid,TabSize,DetsData,{dumper,{add_table_copy,_}}) ->
-    Init = table_init_fun(SenderPid, Storage),
+start_receiver(Tab,Storage,Cs,SenderPid,TabSize,DetsData,{dumper,{add_table_copy,_}}, Queue) ->
+    Init = table_init_fun(SenderPid, Storage, Queue),
     case do_init_table(Tab,Storage,Cs,SenderPid,TabSize,DetsData,self(), Init) of
 	Err = {error, _} ->
 	    SenderPid ! {copier_done, node()},
@@ -340,7 +342,7 @@ start_receiver(Tab,Storage,Cs,SenderPid,TabSize,DetsData,{dumper,{add_table_copy
 
 spawned_receiver(ReplyTo,Tab,Storage,Cs, SenderPid,TabSize,DetsData, Init) ->
     process_flag(trap_exit, true),
-    Done = do_init_table(Tab,Storage,Cs,
+	Done = do_init_table(Tab,Storage,Cs,
 			 SenderPid,TabSize,DetsData,
 			 ReplyTo, Init),
     try
@@ -354,6 +356,7 @@ spawned_receiver(ReplyTo,Tab,Storage,Cs, SenderPid,TabSize,DetsData, Init) ->
 wait_on_load_complete(Pid) ->
     receive
 	{Pid, Res} ->
+		logger:error("load complete: Pid: ~p Res: ~p~n", [Pid, Res]),
 	    Res;
 	{'EXIT', Pid, Reason} ->
 	    error(Reason);
@@ -441,37 +444,42 @@ tab_receiver(Node, Tab, Storage, Cs, OrigTabRec) ->
 	    tab_receiver(Node, Tab, Storage, Cs, OrigTabRec)
     end.
 
-make_table_fun(Pid, TabRec, Storage) ->
+make_table_fun(Pid, TabRec, Storage, Queue) ->
     fun(close) ->
 	    ok;
        ({read, Msg}) ->
 	    Pid ! {TabRec, Msg},
-	    get_data(Pid, TabRec, Storage);
+	    get_data(Pid, TabRec, Storage, Queue);
        (read) ->
-	    get_data(Pid, TabRec, Storage)
+	    get_data(Pid, TabRec, Storage, Queue)
     end.
 
-get_data(Pid, TabRec, Storage) ->
+get_data(Pid, TabRec, Storage, Queue) ->
     receive
 	{Pid, {more_z, CompressedRecs}} when is_binary(CompressedRecs) ->
 	    maybe_reply(Pid, {TabRec, more}, Storage),
 	    {zlib_uncompress(CompressedRecs),
-	     make_table_fun(Pid, TabRec, Storage)};
+	     make_table_fun(Pid, TabRec, Storage, Queue)};
 	{Pid, {more, Recs}} ->
 	    maybe_reply(Pid, {TabRec, more}, Storage),
-	    {Recs, make_table_fun(Pid, TabRec, Storage)};
+	    {Recs, make_table_fun(Pid, TabRec, Storage, Queue)};
 	{Pid, no_more} ->
-	    end_of_input;
+	    logger:error("no more!! node: ~p~n", [Pid]),
+		end_of_input;
 	{copier_done, Node} ->
 	    case node(Pid) of
 		Node ->
+			logger:error("copier done!! node: ~p~n", [Node]),
 		    {copier_done, Node};
 		_ ->
-		    get_data(Pid, TabRec, Storage)
+		    get_data(Pid, TabRec, Storage, Queue)
 	    end;
 	{'EXIT', Pid, Reason} ->
 	    handle_exit(Pid, Reason),
-	    get_data(Pid, TabRec, Storage)
+	    get_data(Pid, TabRec, Storage, Queue);
+	Message ->
+		Queue2 = queue:in(Message, Queue),
+		get_data(Pid, TabRec, Storage, Queue2)
     end.
 
 maybe_reply(_, _, {ext, _, _}) ->
@@ -503,6 +511,7 @@ ext_init_table(Action, Alias, Mod, Tab, Fun, State, Sender) ->
 				   Tab, NewFun, NewState, Sender)
 	    end;
 	end_of_input ->
+		logger:error("Mod: ~p~n", [Mod]),
 	    Mod:receive_done(Alias, Tab, Sender, State),
 	    ok = Fun(close)
     end.
