@@ -128,7 +128,7 @@ do_get_disc_copy2(Tab, Reason, Storage, Type) when Storage == disc_only_copies -
     Args = [{file, mnesia_lib:tab2dat(Tab)},
 	    {type, mnesia_lib:disk_type(Tab, Type)},
 	    {keypos, 2},
-	    {repair, mnesia_monitor:get_env(auto_repair)} 
+	    {repair, mnesia_monitor:get_env(auto_repair)}
 	    | DetsOpts],
     case Reason of
 	{dumper, DR} when is_atom(DR) ->
@@ -356,8 +356,7 @@ spawned_receiver(ReplyTo,Tab,Storage,Cs, SenderPid,TabSize,DetsData, Init) ->
 wait_on_load_complete(Pid) ->
     receive
 	{Pid, Res} ->
-		logger:error("load complete: Pid: ~p Res: ~p~n", [Pid, Res]),
-	    Res;
+		Res;
 	{'EXIT', Pid, Reason} ->
 	    error(Reason);
 	Else ->
@@ -375,7 +374,7 @@ do_init_table(Tab,Storage,Cs,SenderPid,
 	    mnesia_tm:block_tab(Tab),
 	    case init_table(Tab,Storage,Init,DetsInfo,SenderPid) of
 		ok ->
-		    tab_receiver(Node,Tab,Storage,Cs,OrigTabRec);
+			tab_receiver(Node,Tab,Storage,Cs,OrigTabRec);
 		Reason ->
 		    Msg = "[d]ets:init table failed",
 		    verbose("~ts: ~tp: ~tp~n", [Msg, Tab, Reason]),
@@ -464,13 +463,12 @@ get_data(Pid, TabRec, Storage, Queue) ->
 	    maybe_reply(Pid, {TabRec, more}, Storage),
 	    {Recs, make_table_fun(Pid, TabRec, Storage, Queue)};
 	{Pid, no_more} ->
-	    logger:error("no more!! node: ~p~n", [Pid]),
+	    send_queue_item(Queue, TabRec),
 		end_of_input;
 	{copier_done, Node} ->
 	    case node(Pid) of
 		Node ->
-			logger:error("copier done!! node: ~p~n", [Node]),
-		    {copier_done, Node};
+			{copier_done, Node};
 		_ ->
 		    get_data(Pid, TabRec, Storage, Queue)
 	    end;
@@ -481,6 +479,14 @@ get_data(Pid, TabRec, Storage, Queue) ->
 		Queue2 = queue:in(Message, Queue),
 		get_data(Pid, TabRec, Storage, Queue2)
     end.
+
+send_queue_item({{value, Value}, Queue}, TabRec) ->
+	TabRec ! Value,
+	send_queue_item(queue:out(Queue), TabRec);
+send_queue_item({empty, _}, _) ->
+	ok;
+send_queue_item(Queue, TabRec) ->
+	send_queue_item(queue:out(Queue), TabRec).
 
 maybe_reply(_, _, {ext, _, _}) ->
     ignore;
@@ -511,8 +517,7 @@ ext_init_table(Action, Alias, Mod, Tab, Fun, State, Sender) ->
 				   Tab, NewFun, NewState, Sender)
 	    end;
 	end_of_input ->
-		logger:error("Mod: ~p~n", [Mod]),
-	    Mod:receive_done(Alias, Tab, Sender, State),
+		Mod:receive_done(Alias, Tab, Sender, State),
 	    ok = Fun(close)
     end.
 
@@ -568,7 +573,7 @@ finish_copy(Storage,Tab,Cs,SenderPid,DatBin,OrigTabRec) ->
     end.
 
 subscr_receiver(TabRef = {_, Tab}, RecName) ->
-    receive
+	receive
 	{mnesia_table_event, {Op, Val, _Tid}}
 	  when element(1, Val) =:= Tab ->
 	    if
