@@ -478,7 +478,7 @@ get_data(Pid, TabRec, Storage, Queue) ->
 	{'EXIT', Pid, Reason} ->
 	    handle_exit(Pid, Reason),
 	    get_data(Pid, TabRec, Storage, Queue);
-	Message ->
+	{mnesia_table_event, _} = Message ->
 		Queue2 = queue:in(Message, Queue),
 		get_data(Pid, TabRec, Storage, Queue2)
     end.
