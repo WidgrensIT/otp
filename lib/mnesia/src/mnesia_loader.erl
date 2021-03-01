@@ -373,11 +373,7 @@ do_init_table(Tab,Storage,Cs,SenderPid,
 	    put(mnesia_table_receiver, {Tab, Node, SenderPid}),
 	    mnesia_tm:block_tab(Tab),
 	    case init_table(Tab,Storage,Init,DetsInfo,SenderPid) of
-		ok ->
-			receive
-				{queue, Queue} ->
-					tab_receiver(Node,Tab,Storage,Cs,OrigTabRec, Queue)
-			end;
+		ok ->		tab_receiver(Node,Tab,Storage,Cs,OrigTabRec);
 		Reason ->
 		    Msg = "[d]ets:init table failed",
 		    verbose("~ts: ~tp: ~tp~n", [Msg, Tab, Reason]),
@@ -431,10 +427,10 @@ create_table(Tab, TabSize, Storage, Cs) ->
             end
     end.
 
-tab_receiver(Node, Tab, Storage, Cs, OrigTabRec, Queue) ->
+tab_receiver(Node, Tab, Storage, Cs, OrigTabRec) ->
     receive
 	{SenderPid, {no_more, DatBin}} ->
-	    finish_copy(Storage,Tab,Cs,SenderPid,DatBin,OrigTabRec, Queue);
+	    finish_copy(Storage,Tab,Cs,SenderPid,DatBin,OrigTabRec);
 
 	%% Protocol conversion hack
 	{copier_done, Node} ->
@@ -443,7 +439,7 @@ tab_receiver(Node, Tab, Storage, Cs, OrigTabRec, Queue) ->
 
 	{'EXIT', Pid, Reason} ->
 	    handle_exit(Pid, Reason),
-	    tab_receiver(Node, Tab, Storage, Cs, OrigTabRec, Queue)
+	    tab_receiver(Node, Tab, Storage, Cs, OrigTabRec)
     end.
 
 make_table_fun(Pid, TabRec, Storage, Queue) ->
@@ -466,8 +462,7 @@ get_data(Pid, TabRec, Storage, Queue) ->
 	    maybe_reply(Pid, {TabRec, more}, Storage),
 	    {Recs, make_table_fun(Pid, TabRec, Storage, Queue)};
 	{Pid, no_more} ->
-	    TabRec ! {queue, Queue},
-		end_of_input;
+	    end_of_input;
 	{copier_done, Node} ->
 	    case node(Pid) of
 		Node ->
@@ -480,6 +475,7 @@ get_data(Pid, TabRec, Storage, Queue) ->
 	    get_data(Pid, TabRec, Storage, Queue);
 	{mnesia_table_event, _} = Message ->
 		Queue2 = queue:in(Message, Queue),
+		put(mnesia_table_event_queue, Queue2),
 		get_data(Pid, TabRec, Storage, Queue2)
     end.
 
@@ -549,9 +545,9 @@ init_table(Tab, _, Fun, _DetsInfo,_) ->
     end.
 
 
-finish_copy(Storage,Tab,Cs,SenderPid,DatBin,OrigTabRec, Queue) ->
+finish_copy(Storage,Tab,Cs,SenderPid,DatBin,OrigTabRec) ->
     TabRef = {Storage, Tab},
-    subscr_receiver(TabRef, Cs#cstruct.record_name, Queue),
+    subscr_receiver(TabRef, Cs#cstruct.record_name),
     case handle_last(TabRef, Cs#cstruct.type, DatBin) of
 	ok ->
 	    mnesia_index:init_index(Tab, Storage),
@@ -567,37 +563,39 @@ finish_copy(Storage,Tab,Cs,SenderPid,DatBin,OrigTabRec, Queue) ->
 	    down(Tab, Storage)
     end.
 
-subscr_receiver(TabRef = {_, Tab}, RecName, Queue) ->
-	Queue2 = parse_queue(TabRef, RecName, Queue),
-	receive
-	{mnesia_table_event, {Op, Val, _Tid}}
-	  when element(1, Val) =:= Tab ->
-	    if
-		Tab == RecName ->
-		    handle_event(TabRef, Op, Val);
-		true ->
-		    handle_event(TabRef, Op, setelement(1, Val, RecName))
-	    end,
-	    subscr_receiver(TabRef, RecName, Queue2);
+subscr_receiver(TabRef = {_, Tab}, RecName) ->
+	case get(mnesia_table_event_queue) of
+		undefined ->
+			receive
+			{mnesia_table_event, {Op, Val, _Tid}}
+			when element(1, Val) =:= Tab ->
+				if
+				Tab == RecName ->
+					handle_event(TabRef, Op, Val);
+				true ->
+					handle_event(TabRef, Op, setelement(1, Val, RecName))
+				end,
+				subscr_receiver(TabRef, RecName);
 
-	{mnesia_table_event, {Op, Val, _Tid}} when element(1, Val) =:= schema ->
-	    %% clear_table is faked via two schema events
-	    %% a schema record delete and a write
-	    case Op of
-		delete -> handle_event(TabRef, clear_table, {Tab, all});
-		_ -> ok
-	    end,
-	    subscr_receiver(TabRef, RecName, Queue2);
+			{mnesia_table_event, {Op, Val, _Tid}} when element(1, Val) =:= schema ->
+				%% clear_table is faked via two schema events
+				%% a schema record delete and a write
+				case Op of
+				delete -> handle_event(TabRef, clear_table, {Tab, all});
+				_ -> ok
+				end,
+				subscr_receiver(TabRef, RecName);
 
-	{'EXIT', Pid, Reason} ->
-	    handle_exit(Pid, Reason),
-	    subscr_receiver(TabRef, RecName, Queue2)
-    after 0 ->
-	    ok
-    end.
+			{'EXIT', Pid, Reason} ->
+				handle_exit(Pid, Reason),
+				subscr_receiver(TabRef, RecName)
+			after 0 ->
+				ok
+			end;
+		Queue ->
+			parse_queue(TabRef, RecName, Queue)
+	end.
 
-parse_queue(_, _, done) ->
-	done;
 parse_queue(TabRef = {_, Tab}, RecName, Queue) ->
 	case queue:out(Queue) of
 		{{value, Value}, Queue2} ->
@@ -625,7 +623,8 @@ parse_queue(TabRef = {_, Tab}, RecName, Queue) ->
 					parse_queue(TabRef, RecName, Queue2)
 				end;
 		{empty, _} ->
-			done
+			put(mnesia_table_event_queue, undefined),
+			undefined
 	end.
 handle_event(TabRef, write, Rec) ->
     db_put(TabRef, Rec);
