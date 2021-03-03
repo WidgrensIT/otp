@@ -593,7 +593,8 @@ subscr_receiver(TabRef = {_, Tab}, RecName) ->
 				ok
 			end;
 		Queue ->
-			parse_queue(TabRef, RecName, Queue)
+			parse_queue(TabRef, RecName, Queue),
+			subscr_receiver(TabRef, RecName)
 	end.
 
 parse_queue(TabRef = {_, Tab}, RecName, Queue) ->
@@ -623,7 +624,7 @@ parse_queue(TabRef = {_, Tab}, RecName, Queue) ->
 					parse_queue(TabRef, RecName, Queue2)
 				end;
 		{empty, _} ->
-			put(mnesia_table_event_queue, undefined),
+			erase(mnesia_table_event_queue),
 			undefined
 	end.
 handle_event(TabRef, write, Rec) ->
